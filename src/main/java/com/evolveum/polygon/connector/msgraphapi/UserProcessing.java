@@ -6,6 +6,7 @@ import org.apache.http.client.methods.HttpDelete;
 import org.apache.http.client.methods.HttpEntityEnclosingRequestBase;
 import org.apache.http.client.methods.HttpPatch;
 import org.apache.http.client.methods.HttpPost;
+import org.apache.http.client.methods.HttpPut;
 import org.apache.http.client.utils.URIBuilder;
 import org.identityconnectors.common.CollectionUtil;
 import org.identityconnectors.common.security.GuardedString;
@@ -16,6 +17,7 @@ import org.identityconnectors.framework.common.objects.filter.EqualsFilter;
 import org.identityconnectors.framework.common.objects.filter.Filter;
 import org.json.JSONArray;
 import org.json.JSONObject;
+import com.evolveum.polygon.connector.msgraphapi.UserProcessing;
 
 import java.net.URI;
 import java.util.*;
@@ -52,6 +54,8 @@ public class UserProcessing extends ObjectProcessing {
     private static final String ATTR_MEMBER_OF_GROUP = "memberOfGroup";
     //private static final String ATTR_MEMBER_OF_ROLE= "memberOfRole";
 
+    //manager
+    private static final String ATTR_MANAGER = "manager";
 
     //optional
     private static final String ATTR_ABOUTME = "aboutMe"; // Need SPO license
@@ -329,6 +333,11 @@ public class UserProcessing extends ObjectProcessing {
         userObjClassBuilder.addAttributeInfo(attrCountry.build());
 
         //supports $filter
+        AttributeInfoBuilder attrManager = new AttributeInfoBuilder(ATTR_MANAGER);
+        attrManager.setRequired(false).setType(String.class).setCreateable(true).setUpdateable(true).setReadable(true);
+        userObjClassBuilder.addAttributeInfo(attrManager.build());
+
+        //supports $filter
         AttributeInfoBuilder attrDepartment = new AttributeInfoBuilder(ATTR_DEPARTMENT);
         attrDepartment.setRequired(false).setType(String.class).setCreateable(true).setUpdateable(true).setReadable(true);
         userObjClassBuilder.addAttributeInfo(attrDepartment.build());
@@ -546,12 +555,19 @@ public class UserProcessing extends ObjectProcessing {
         AttributeDeltaBuilder delta = new AttributeDeltaBuilder();
         delta.setName(ATTR_ASSIGNEDLICENSES__SKUID);
         List<Object> addLicenses = new ArrayList<>();
-        // filter out the assignedLicense.skuId attribute, which must be handled separately
+-       // filter out the assignedLicense.skuId attribute, which must be handled separately
+       
+
+        // filter out the assignedLicense.skuId and manager attribute, which must be handled separately
         Set<Attribute> preparedAttributes = replaceAttributes.stream()
                 .filter(it -> {
                     if (it.getName().equals(ATTR_ASSIGNEDLICENSES__SKUID)) {
                         if (it.getValue() != null)
                             addLicenses.addAll(it.getValue());
+                        return false;
+                    } else if (it.getName().equals(ATTR_MANAGER)) {
+                        if (it.getValue() != null) 
+                        LOG.info("Excluding manager to principal query");                                                      
                         return false;
                     } else
                         return true;
@@ -607,6 +623,33 @@ public class UserProcessing extends ObjectProcessing {
         return json;
     }
 
+    private void assignManager(Uid uid, Set<Attribute> replaceAttributes) {
+        Set<Attribute> preparedManager = replaceAttributes.stream()
+                .filter(it -> {
+                    if (it.getName().equals(ATTR_MANAGER)) {
+                        if (it.getValue() != null)                 
+                            LOG.info("Value manager to set {0}", it.getValue());
+                            //FIXME: Manejar el valor como arraylist
+                            final String valueManager = it.getValue().toString().replace("[", "").replace("]", "");
+                            final GraphEndpoint endpointManager = getGraphEndpoint();
+                            final URIBuilder uriBuilderManager = endpointManager.createURIBuilder().setPath("users/" + valueManager);                             
+                            final URIBuilder uriBuilder = endpointManager.createURIBuilder().setPath("users/" + uid.getUidValue() + "/manager/$ref");                                                     
+                            HttpEntityEnclosingRequestBase requestManager = null;
+                            URI uri = endpointManager.getUri(uriBuilder);
+                            requestManager = new HttpPut(uri);
+                            requestManager.setHeader("Content-type", "application/json");
+                            JSONObject jsonObject = new JSONObject();
+                            jsonObject.put("@odata.id", uriBuilderManager);
+                            LOG.info("jsonObject to set Manager: {0}", jsonObject);
+                            endpointManager.callRequestNoContent(requestManager, null, jsonObject);
+                            LOG.info("Manager Set Ok");                                                                  
+                        return true;
+                    } else
+                    return false;
+                })                
+                .collect(Collectors.toSet());             
+    }
+    
     private void assignLicenses(Uid uid, AttributeDelta deltaLicense) {
         final List<Object> addLicenses = deltaLicense.getValuesToAdd();
         final List<Object> removeLicenses = deltaLicense.getValuesToRemove();
@@ -643,16 +686,18 @@ public class UserProcessing extends ObjectProcessing {
         final GraphEndpoint endpoint = getGraphEndpoint();
         final URIBuilder uriBuilder = endpoint.createURIBuilder().setPath(USERS + "/" + uid.getUidValue());
         HttpEntityEnclosingRequestBase request = null;
-        URI uri = endpoint.getUri(uriBuilder);
+        URI uri = endpoint.getUri(uriBuilder);        
+        
         LOG.info("update user, PATCH");
         LOG.info("Path: {0}", uri);
         request = new HttpPatch(uri);
         final Set<AttributeDelta> deltas = new HashSet<>();
         Set<Attribute> updateAttributes = prepareAttributes(uid, attributes, deltas, false);
+        assignManager(uid,attributes);
 
         List<Object> jsonObjectaccount = buildLayeredAtrribute(updateAttributes);
         endpoint.callRequestNoContentNoJson(request, jsonObjectaccount);
-        assignLicenses(uid, AttributeDeltaUtil.find(ATTR_ASSIGNEDLICENSES__SKUID, deltas));
+        assignLicenses(uid, AttributeDeltaUtil.find(ATTR_ASSIGNEDLICENSES__SKUID, deltas));        
     }
 
     public Uid createUser(Uid uid, Set<Attribute> attributes) {
@@ -712,9 +757,9 @@ public class UserProcessing extends ObjectProcessing {
             final JSONObject jsonRequest = endpoint.callRequest(request, payload, true);
             newUid = jsonRequest.getString(ATTR_ID);
         }
-
+        
         assignLicenses(new Uid(newUid), AttributeDeltaUtil.find(ATTR_ASSIGNEDLICENSES__SKUID, deltas));
-
+        assignManager(new Uid(newUid),attributes);
         return new Uid(newUid);
     }
 
@@ -774,7 +819,7 @@ public class UserProcessing extends ObjectProcessing {
         final GraphEndpoint endpoint = getGraphEndpoint();
         final String selectorSingle = selector(getSchemaTranslator().filter(ObjectClass.ACCOUNT_NAME, options,
                 ATTR_ACCOUNTENABLED, ATTR_DISPLAYNAME,
-                ATTR_ONPREMISESIMMUTABLEID, ATTR_MAILNICKNAME, ATTR_USERPRINCIPALNAME, ATTR_ABOUTME,
+                ATTR_ONPREMISESIMMUTABLEID, ATTR_MAILNICKNAME, ATTR_USERPRINCIPALNAME, ATTR_ABOUTME, ATTR_MANAGER,
                 ATTR_BIRTHDAY, ATTR_CITY, ATTR_COMPANYNAME, ATTR_COUNTRY, ATTR_DEPARTMENT,
                 ATTR_GIVENNAME, ATTR_HIREDATE, ATTR_IMADDRESSES, ATTR_ID, ATTR_INTERESTS,
                 ATTR_JOBTITLE, ATTR_MAIL, ATTR_MOBILEPHONE, ATTR_MYSITE, ATTR_OFFICELOCATION,
@@ -784,7 +829,8 @@ public class UserProcessing extends ObjectProcessing {
                 ATTR_PROXYADDRESSES, ATTR_RESPONSIBILITIES, ATTR_SCHOOLS,
                 ATTR_SKILLS, ATTR_STATE, ATTR_STREETADDRESS, ATTR_SURNAME,
                 ATTR_USAGELOCATION, ATTR_USERTYPE, ATTR_ASSIGNEDLICENSES,
-                ATTR_EXTERNALUSERSTATE, ATTR_EXTERNALUSERSTATECHANGEDATETIME));
+                ATTR_EXTERNALUSERSTATE, ATTR_EXTERNALUSERSTATECHANGEDATETIME)) + "&$expand=manager($levels=1;$select=id)";
+        
 
         final String selectorList = selector(
                 ATTR_ACCOUNTENABLED, ATTR_DISPLAYNAME,
@@ -1052,8 +1098,14 @@ public class UserProcessing extends ObjectProcessing {
 
         getMultiIfExists(user, ATTR_PROXYADDRESSES, builder);
         getFromArrayIfExists(user, ATTR_ASSIGNEDLICENSES, ATTR_SKUID, String.class, builder);
+
+        if(!(user.isNull(ATTR_MANAGER))) {
+            JSONObject manager = user.getJSONObject(ATTR_MANAGER);
+            String id = manager.getString(ATTR_ID);          
+            builder.addAttribute(ATTR_MANAGER,id);
+		}
+
         return builder;
     }
-
 
 }
