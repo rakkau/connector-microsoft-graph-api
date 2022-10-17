@@ -555,9 +555,6 @@ public class UserProcessing extends ObjectProcessing {
         AttributeDeltaBuilder delta = new AttributeDeltaBuilder();
         delta.setName(ATTR_ASSIGNEDLICENSES__SKUID);
         List<Object> addLicenses = new ArrayList<>();
--       // filter out the assignedLicense.skuId attribute, which must be handled separately
-       
-
         // filter out the assignedLicense.skuId and manager attribute, which must be handled separately
         Set<Attribute> preparedAttributes = replaceAttributes.stream()
                 .filter(it -> {
